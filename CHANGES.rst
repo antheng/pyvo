@@ -11,6 +11,13 @@ Enhancements and Fixes
   functionality when appropriate for each request it makes to a resource.
   Requires the new optional dependencies installed with
   ``pip install pyvo[oauth2]``. [#785]
+- ``AsyncTAPJob.wait()``'s ``timeout`` is now enforced as a total wait budget
+  instead of being passed straight through as the per-request timeout.
+  Transient network errors encountered while polling are retried
+  within that budget and exceeding it now raises a new
+  ``DALJobTimeoutError``. Passing ``timeout=None`` explicitly now waits
+  indefinitely, rather than only affecting the read timeout of individual
+  poll requests. [#784]
 
 Deprecations and Removals
 -------------------------
