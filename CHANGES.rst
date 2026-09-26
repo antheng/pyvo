@@ -4,6 +4,15 @@
 Enhancements and Fixes
 ----------------------
 
+- Introduce new module ``pyvo.auth.oauth2``, containing new classes
+  ``pyvo.auth.oauth2.VOAuthSession`` which is intended as an OAuth2 equivalent
+  of ``pyvo.auth.AuthSession``, using `pyvo.auth.oauth2.SessionStore`` for \
+  session token and credential storage. ``pyvo.auth.oauth2.VOAuthSession``
+  aims to provide OAuth2 discovery, registration and authentication
+  functionality when appropriate for each request it makes to a resource.
+  Requires the new optional dependencies installed with
+  ``pip install pyvo[oauth2]``. [#785]
+
 
 Deprecations and Removals
 -------------------------
@@ -37,6 +46,15 @@ Enhancements and Fixes
   ``DALJobTimeoutError``. Passing ``timeout=None`` explicitly now waits
   indefinitely, rather than only affecting the read timeout of individual
   poll requests. [#784]
+
+Deprecations and Removals
+-------------------------
+
+1.9.2 (unreleased)
+==================
+
+Enhancements and Fixes
+----------------------
 
 - Fix a bug where a custom session (including authentication configuration) was
   not propagated when retrieving tables with the ``TAPService.tables``
