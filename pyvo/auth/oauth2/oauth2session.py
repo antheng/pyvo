@@ -677,7 +677,8 @@ class VOAuthSession:
             for prop in scheme.split(" "):
                 if prop.startswith("resource_metadata="):
                     # Extract the prop value from resource_metadata=resource_metadata_url
-                    resource_metadata_url = prop.split("=")[1]
+                    # Strip whitespace and quotes
+                    resource_metadata_url = prop.split("=")[1].strip().strip('"')
                     if verify_tls:
                         self._verify_https(resource_metadata_url, "Resource metadata URL")
                     return resource_metadata_url
