@@ -15,12 +15,14 @@ TODO: Only device_code grant type is supported at this stage: to introduce other
 import logging
 import time
 from typing import Collection, List
+from urllib.parse import urlparse
 
 import requests
 # Oauthlib imports. Raise ImportError if not installed
 try:
     from oauthlib.oauth2 import (
         DeviceClient,
+        InsecureTransportError,
         ServerError,
         UnsupportedGrantTypeError,
         OAuth2Error,
@@ -125,6 +127,7 @@ class VOAuthSession:
                  client_id: str | None = None,
                  client_secret: str | None = None,
                  auth: requests.auth.AuthBase | None = None,
+                 verify: bool = True,
                  **kwargs) -> Response:
         """
         Make an HTTP request with authentication.
@@ -164,6 +167,10 @@ class VOAuthSession:
             alternative way to pass the client credentials. Will take
             precedence over ``client_id`` and ``client_secret`` if passed alongside
             these parameters.
+        verify : bool
+            True to require TLS for any discovered endpoints used for authorization.
+            Will raise InsecureTransportError for any endpoints that require TLS.
+            Defaults to True.
         **kwargs : Other request kwargs
             Additional kwargs to pass to the request.
 
@@ -191,13 +198,13 @@ class VOAuthSession:
                 return response
 
             try:
-                rs_metadata_uri = self._parse_resource_metadata_uri(response)
+                rs_metadata_uri = self._parse_resource_metadata_uri(response, verify)
                 # Get from either new auth or given auth. Fallback to default
                 # if attribute isn't present.
                 client_id = getattr(auth, "username", client_id)
                 client_secret = getattr(auth, "password", client_secret)
                 session, new_secret = self.authenticate_new_session_from_metadata(
-                    rs_metadata_uri, client_id, client_secret, url)
+                    rs_metadata_uri, client_id, client_secret, url, verify_tls=verify)
             except Exception as e:
                 log.debug("Exception during attempted authentication: %s", e)
                 return response
@@ -355,6 +362,7 @@ class VOAuthSession:
         client_id: str | None = None,
         client_secret: str | None = None,
         redirect_uri: str | None = None,
+        verify_tls: bool = True,
     ):
         """
         Discover the authorization server for a resource and build an
@@ -377,6 +385,10 @@ class VOAuthSession:
         redirect_uri : str, optional
             Redirect URI to associate with the session and with the dynamic
             registration request.
+        verify_tls : bool
+            True to require TLS for any discovered endpoints in metadata.
+            Will raise InsecureTransportError for any endpoints that require TLS.
+            Defaults to True.
 
         Returns
         -------
@@ -404,7 +416,7 @@ class VOAuthSession:
             raise e
 
         # If exception is raised here, let it pass up
-        as_metadata = self._discover_as_metadata(rs_metadata)
+        as_metadata = self._discover_as_metadata(rs_metadata, verify_tls=verify_tls)
 
         scopes = self._resolve_scopes(as_metadata)
         grant_types = self._resolve_grant_types(as_metadata)
@@ -419,8 +431,11 @@ class VOAuthSession:
                 "No client credentials provided, performing dynamic registration."
             )
             if "registration_endpoint" in as_metadata:
+                registration_endpoint = as_metadata["registration_endpoint"]
+                if verify_tls:
+                    self._verify_https(registration_endpoint, "Registration endpoint")
                 client_id, client_secret = self.get_dynamic_client_credentials(
-                    as_metadata["registration_endpoint"], scopes,
+                    registration_endpoint, scopes,
                     client_name=self.client_name,
                     grant_types=grant_types,
                     redirect_uri=redirect_uri,
@@ -436,7 +451,8 @@ class VOAuthSession:
         )
 
         self._fetch_session_token_based_on_grant_type(
-            session, as_metadata, client_id, client_secret
+            session, as_metadata, client_id, client_secret,
+            verify_tls=verify_tls
         )
         return session, client_secret
 
@@ -508,7 +524,7 @@ class VOAuthSession:
         client_metadata = registration_response.json()
         return client_metadata["client_id"], client_metadata.get("client_secret")
 
-    def find_as_metadata(self, authorization_servers: List[str]):
+    def find_as_metadata(self, authorization_servers: List[str], verify_tls: bool = True):
         """
         Locate and retrieve usable authorization server metadata.
 
@@ -540,6 +556,18 @@ class VOAuthSession:
             metadata containing a ``token_endpoint``.
         """
         for as_base in authorization_servers:  # Try each authorization server
+
+            if verify_tls:
+                try:
+                    self._verify_https(as_base, "Authorization Server URL")
+                except InsecureTransportError:
+                    log.debug(
+                        "Skipping authorization server %s as TLS verification is "
+                        "required but the URL does not use https.",
+                        as_base,
+                    )
+                    continue
+
             for as_metadata_uri in [f"{as_base}/.well-known/openid-configuration",
                                         f"{as_base}/.well-known/oauth-authorization-server"]:
                 log.debug(
@@ -573,7 +601,8 @@ class VOAuthSession:
                                                  session: OAuth2Session,
                                                  as_metadata: dict,
                                                  client_id: str,
-                                                 client_secret: str):
+                                                 client_secret: str,
+                                                 verify_tls: bool = True):
         """
         Follow the token retrieval method appropriate for the client type,
         using the given client ID and secret.
@@ -582,7 +611,9 @@ class VOAuthSession:
         on its OAuth2Session to retrieve tokens (most specifically
         token_from_fragment).
         """
-        token_endpoint = as_metadata["token_endpoint"]
+        token_endpoint: str = as_metadata["token_endpoint"]
+        if verify_tls:
+            self._verify_https(token_endpoint, "Token Endpoint")
 
         if isinstance(session._client, DeviceClient):
             if "device_authorization_endpoint" in as_metadata:
@@ -595,6 +626,9 @@ class VOAuthSession:
                 authorization_url, _state = session.authorization_url(
                     as_metadata["authorization_endpoint"]
                 )
+
+            if verify_tls:
+                self._verify_https(authorization_url, "Device authorization endpoint")
 
             log.debug("Device flow detected, polling %s for a token.",
                       authorization_url)
@@ -627,7 +661,7 @@ class VOAuthSession:
         response.raise_for_status()
         return response.json()
 
-    def _discover_as_metadata(self, rs_metadata: dict) -> dict:
+    def _discover_as_metadata(self, rs_metadata: dict, verify_tls: bool = True) -> dict:
         """Resolve usable authorization server metadata from resource metadata."""
         log.debug("Resource metadata: %s", rs_metadata)
 
@@ -635,11 +669,10 @@ class VOAuthSession:
         if not as_servers:
             raise ServerError("No authorization servers advertised in resource server metadata")
 
-        as_metadata = self.find_as_metadata(as_servers)
+        as_metadata = self.find_as_metadata(as_servers, verify_tls=verify_tls)
         return as_metadata
 
-    @staticmethod
-    def _parse_resource_metadata_uri(response: Response):
+    def _parse_resource_metadata_uri(self, response: Response, verify_tls: bool):
         """Extract the ``resource_metadata`` property from a 401 challenge header
         from the given response object"""
         www_auth_headers = response.headers.get("WWW-Authenticate").split(",")
@@ -649,7 +682,10 @@ class VOAuthSession:
             for prop in scheme.split(" "):
                 if prop.startswith("resource_metadata="):
                     # Extract the prop value from resource_metadata=resource_metadata_url
-                    return prop.split("=")[1]
+                    resource_metadata_url = prop.split("=")[1]
+                    if verify_tls:
+                        self._verify_https(resource_metadata_url, "Resource metadata URL")
+                    return resource_metadata_url
 
         raise OAuth2Error("No resource metadata URI found in WWW-Authenticate header")
 
@@ -728,3 +764,14 @@ class VOAuthSession:
             client_class.__name__,
         )
         return OAuth2Session(client=client_class(client_id=client_id), **session_kwargs)
+
+    @staticmethod
+    def _verify_https(url: str, what: str) -> None:
+        """
+        Raise ``InsecureTransportError`` if TLS is required and ``url`` is not https.
+        `what` describes the purpose of ``url`` in the exception message.
+        """
+        if urlparse(url).scheme.lower() != "https":
+            raise InsecureTransportError(
+                description=f"{what} {url} must use https when TLS verification is enabled."
+            )
