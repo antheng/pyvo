@@ -30,13 +30,13 @@ try:
     from oauthlib.oauth2.rfc6749.errors import CustomOAuth2Error
     from requests import Response
     from requests_oauthlib import OAuth2Session
+    from .sessionstore import SessionStore
 except ImportError as exc:
     raise ImportError(
         "OAuth 2 Session support requires packages requests-oauthlib and keyring with a compatible "
         "backend. Install with pip install pyvo[oauth2]"
     ) from exc
 
-from .sessionstore import SessionStore
 
 __all__ = ["VOAuthSession"]
 
@@ -314,14 +314,10 @@ class VOAuthSession:
             raise e
 
         device_data = device_code_response.json()
-        device_code = device_data["device_code"]
-        user_code = device_data["user_code"]
-        verification_uri = device_data["verification_uri"]
-        expires_in = device_data["expires_in"]
         start_time = time.time()
         log.debug("Device code response data: %s", device_data)
-        print(f"Go to: {verification_uri}")
-        print(f"Enter code: {user_code}")
+        print(f"Go to: {device_data["verification_uri"]}")
+        print(f"Enter code: {device_data["user_code"]}")
 
         token = None
         if interval is None:
@@ -329,7 +325,7 @@ class VOAuthSession:
             interval = device_data.get("interval", 5)
         attempts = 0
         while token is None:
-            if time.time() - start_time > expires_in:
+            if time.time() - start_time > device_data["expires_in"]:
                 raise TimeoutError(
                     "Device code expired"
                 )
@@ -340,7 +336,7 @@ class VOAuthSession:
                 log.debug("Polling token endpoint %s for device code.", token_endpoint)
                 token = session.fetch_token(
                     token_endpoint,
-                    device_code=device_code,
+                    device_code=device_data["device_code"],
                     include_client_id=True,
                     client_id=client_id,
                     client_secret=client_secret,
@@ -590,8 +586,7 @@ class VOAuthSession:
                         as_metadata_uri,
                     )
                     continue
-                else:
-                    return as_metadata
+                return as_metadata
         # No usable as_metadata found
         raise ServerError("No usable authorization server metadata found"
                           f"in {authorization_servers}")
