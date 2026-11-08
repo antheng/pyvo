@@ -201,6 +201,10 @@ class VOAuthSession:
                 rs_metadata_uri = self._parse_resource_metadata_uri(response, verify)
                 # Get from either new auth or given auth. Fallback to default
                 # if attribute isn't present.
+                # NOTE: These attributes "username" and "password" are not actual
+                #   usernames and passwords: they are the attributes of
+                #   most requests.auth.AuthBase classes that are used to store
+                #   credentials: one visible, one secret.
                 client_id = getattr(auth, "username", client_id)
                 client_secret = getattr(auth, "password", client_secret)
                 session, new_secret = self.authenticate_new_session_from_metadata(
@@ -316,8 +320,8 @@ class VOAuthSession:
         device_data = device_code_response.json()
         start_time = time.time()
         log.debug("Device code response data: %s", device_data)
-        print(f"Go to: {device_data["verification_uri"]}")
-        print(f"Enter code: {device_data["user_code"]}")
+        print(f"Go to: {device_data['verification_uri']}")
+        print(f"Enter code: {device_data['user_code']}")
 
         token = None
         if interval is None:
