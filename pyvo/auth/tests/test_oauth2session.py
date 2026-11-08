@@ -4,13 +4,18 @@ correct authentication flow and handling of potential failure conditions.
 """
 import base64
 from contextlib import ExitStack
+import requests
 from requests.exceptions import HTTPError
 from urllib.parse import parse_qs
 import pytest
 
 try:
     from pyvo.auth.oauth2.oauth2session import VOAuthSession
-    from oauthlib.oauth2 import ServerError, UnsupportedGrantTypeError
+    from oauthlib.oauth2 import (
+        InsecureTransportError,
+        ServerError,
+        UnsupportedGrantTypeError,
+    )
 except ImportError:
     pytest.skip(
         "oauth2 extra (keyring, requests-oauthlib) not installed",
@@ -633,3 +638,216 @@ def test_authentication_flow_known_client_id(setup_test_server):
     assert stored_session.token["access_token"] == "correcttoken"
     assert (session.session_store.get_client_secret_for_url(
         "https://example.com/tap") == "known-secret")
+
+
+def test_parse_resource_metadata_uri_rejects_insecure_url(mocker):
+    """Attempt to access insecure RS metadata url should lead to an InsecureTransportError"""
+    session = VOAuthSession()
+    with mocker.register_uri(
+        "GET", "https://example.com/tap",
+        status_code=401, text="unauthorized",
+        headers={
+            "WWW-Authenticate": (
+                'Bearer realm="test", resource_metadata='
+                '"http://example.com/.well-known/oauth-protected-resource"'
+            )
+        },
+    ):
+        response = requests.get("https://example.com/tap")
+
+    with pytest.raises(InsecureTransportError):
+        session._parse_resource_metadata_uri(response, True)
+
+
+def test_parse_resource_metadata_uri_allows_insecure_url_verify_false(mocker):
+    """Test options to allow insecure metadata urls"""
+    session = VOAuthSession()
+    with mocker.register_uri(
+        "GET", "https://example.com/tap",
+        status_code=401, text="unauthorized",
+        headers={
+            "WWW-Authenticate": (
+                'Bearer realm="test", resource_metadata='
+                '"http://example.com/.well-known/oauth-protected-resource"'
+            )
+        },
+    ):
+        response = requests.get("https://example.com/tap")
+
+    uri = session._parse_resource_metadata_uri(response, False)
+    assert uri == "http://example.com/.well-known/oauth-protected-resource"
+
+
+def test_find_as_metadata_skips_insecure_authorization_server(mocker):
+    """Ensure that, by default, AS urls are not chosen"""
+    with mocker.register_uri(
+        "GET", "https://as-server2/cas/.well-known/openid-configuration",
+        json={
+            "issuer": "https://as-server2/cas",
+            "token_endpoint": "https://as-server2/cas/token",
+        }
+    ) as secure_matcher, mocker.register_uri(
+        "GET", "https://as-server2/cas/.well-known/oauth-authorization-server",
+        status_code=404,
+    ):
+        session = VOAuthSession()
+        metadata = session.find_as_metadata(
+            ["http://as-server1/cas", "https://as-server2/cas"]
+        )
+
+        # Only the secure authorization server was ever contacted.
+        # If as-server1 is contacted it will raise an exception due to no mock
+        # address being made for it.
+        assert secure_matcher.called_once
+    assert metadata["token_endpoint"] == "https://as-server2/cas/token"
+
+
+def test_registration_endpoint_must_be_https(mocker):
+    """Require the registration endpoint to be secure"""
+    with mocker.register_uri(
+        "GET", "https://example.com/rs-metadata",
+        json={"authorization_servers": ["https://as-server1.com"]}
+    ), mocker.register_uri(
+        "GET", "https://as-server1.com/.well-known/openid-configuration",
+        json={
+            "token_endpoint": "https://as-server1.com/token",
+            "registration_endpoint": "http://as-server1.com/register",
+            "grant_types_supported": [
+                "urn:ietf:params:oauth:grant-type:device_code"
+            ],
+        }
+    ):
+        session = VOAuthSession()
+        with pytest.raises(InsecureTransportError):
+            session.authenticate_new_session_from_metadata(
+                "https://example.com/rs-metadata"
+            )
+
+
+def test_token_endpoint_must_be_https(mocker):
+    with mocker.register_uri(
+        "GET", "https://example.com/rs-metadata",
+        json={"authorization_servers": ["https://as-server1.com"]}
+    ), mocker.register_uri(
+        "GET", "https://as-server1.com/.well-known/openid-configuration",
+        json={
+            "token_endpoint": "http://as-server1.com/token",
+            "grant_types_supported": [
+                "urn:ietf:params:oauth:grant-type:device_code"
+            ],
+        }
+    ):
+        session = VOAuthSession()
+        with pytest.raises(InsecureTransportError):
+            session.authenticate_new_session_from_metadata(
+                "https://example.com/rs-metadata",
+                client_id="explicit-client-id",
+                client_secret="explicit-client-secret",
+            )
+
+
+def test_device_authorization_endpoint_must_be_https(mocker):
+    with mocker.register_uri(
+        "GET", "https://example.com/rs-metadata",
+        json={"authorization_servers": ["https://as-server1.com"]}
+    ), mocker.register_uri(
+        "GET", "https://as-server1.com/.well-known/openid-configuration",
+        json={
+            "token_endpoint": "https://as-server1.com/token",
+            "device_authorization_endpoint":
+                "http://as-server1.com/device_authorization",
+            "grant_types_supported": [
+                "urn:ietf:params:oauth:grant-type:device_code"
+            ],
+        }
+    ):
+        session = VOAuthSession()
+        with pytest.raises(InsecureTransportError):
+            session.authenticate_new_session_from_metadata(
+                "https://example.com/rs-metadata",
+                client_id="explicit-client-id",
+                client_secret="explicit-client-secret",
+            )
+
+
+def test_authentication_flow_insecure_resource_metadata_url_skips_authentication(mocker):
+    """
+    Ensure that if the resource_metadata URL itself is not https authentication
+    must not be attempted (and the original 401 response is returned as-is).
+    """
+    session = VOAuthSession()
+
+    with mocker.register_uri(
+        "GET", "https://rs.example.com/insecure-resource-metadata/tap",
+        status_code=401, text="unauthorized",
+        headers={
+            "WWW-Authenticate": (
+                'Bearer realm="example", resource_metadata='
+                '"http://rs.example.com/.well-known/oauth-protected-resource"'
+            )
+        },
+    ) as matcher:
+        response = session.get(
+            "https://rs.example.com/insecure-resource-metadata/tap"
+        )
+        assert matcher.called_once
+
+    assert response.status_code == 401
+    assert response.text == "unauthorized"
+    with pytest.raises(KeyError):
+        session.session_store[
+            "https://rs.example.com/insecure-resource-metadata/tap"]
+
+
+@pytest.mark.parametrize("www_authenticate,expected_uri", [
+    (f'Bearer realm="test", resource_metadata={metadata_url_repr}',
+     "https://example.com/.well-known/oauth-protected-resource")
+    for metadata_url_repr in [
+        # Unquoted
+        'https://example.com/.well-known/oauth-protected-resource',
+        # Quoted
+        '"https://example.com/.well-known/oauth-protected-resource"',
+    ]
+])
+def test_parse_resource_metadata_uri_supports_quotes(
+        mocker, www_authenticate, expected_uri):
+    """
+    Test various representations of the resource metadata url still work,
+    including quoted values in the WWW-Authenticate header and trailing
+    whitespace
+    """
+    session = VOAuthSession()
+    with mocker.register_uri(
+        "GET", "https://example.com/tap",
+        status_code=401, text="unauthorized",
+        headers={"WWW-Authenticate": www_authenticate},
+    ):
+        response = requests.get("https://example.com/tap")
+
+    uri = session._parse_resource_metadata_uri(response, True)
+    assert uri == expected_uri
+
+
+def test_authentication_flow_with_quoted_resource_metadata_url(setup_test_server):
+    """Ensure quoted resource metadata urls work in the flow"""
+    session = VOAuthSession()
+
+    matchers = setup_test_server(
+        www_authenticate=(
+            'Bearer realm="test", resource_metadata='
+            '"https://example.com/tap/.well-known/oauth-protected-resource"'
+        ),
+    )
+    (resource_matcher, rs_metadata_matcher, _openid_matcher,
+     as_metadata_matcher, register_matcher, authorization_matcher, token_matcher) = matchers
+
+    response = session.get("https://example.com/tap")
+
+    assert response.status_code == 200
+    assert response.text == "secret data"
+    assert resource_matcher.call_count == 2
+    assert rs_metadata_matcher.called_once
+    assert as_metadata_matcher.called_once
+    assert register_matcher.called_once
+    assert authorization_matcher.called_once
+    assert token_matcher.called_once
