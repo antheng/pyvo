@@ -813,8 +813,7 @@ def test_parse_resource_metadata_uri_supports_quotes(
         mocker, www_authenticate, expected_uri):
     """
     Test various representations of the resource metadata url still work,
-    including quoted values in the WWW-Authenticate header and trailing
-    whitespace
+    including quoted values in the WWW-Authenticate header
     """
     session = VOAuthSession()
     with mocker.register_uri(
