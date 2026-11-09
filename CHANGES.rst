@@ -47,15 +47,6 @@ Enhancements and Fixes
   indefinitely, rather than only affecting the read timeout of individual
   poll requests. [#784]
 
-Deprecations and Removals
--------------------------
-
-1.9.2 (unreleased)
-==================
-
-Enhancements and Fixes
-----------------------
-
 - Fix a bug where a custom session (including authentication configuration) was
   not propagated when retrieving tables with the ``TAPService.tables``
   property. [#772]
